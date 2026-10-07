@@ -69,7 +69,7 @@ jobs:
               "Content-Type": "application/json",
               "Origin": "https://leetcode.com",
               "Referer": "https://leetcode.com/",
-              "x-csrftoken": CSRF,
+              "X-CSRFToken": CSRF,
               "User-Agent": (
                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 "
@@ -85,10 +85,11 @@ jobs:
 
 
           # ============================================================
-          # GRAPHQL HELPER
+          # GRAPHQL REQUEST
           # ============================================================
 
           def graphql(query, variables=None):
+
               response = requests.post(
                   LEETCODE_GRAPHQL,
                   headers=HEADERS,
@@ -100,11 +101,22 @@ jobs:
                   timeout=30,
               )
 
-              response.raise_for_status()
+              # Print response when LeetCode rejects request.
+              if response.status_code != 200:
+
+                  print()
+                  print("LeetCode HTTP error:")
+                  print(response.status_code)
+                  print(response.text)
+                  print()
+
+                  response.raise_for_status()
+
 
               data = response.json()
 
               if data.get("errors"):
+
                   raise RuntimeError(
                       json.dumps(
                           data["errors"],
@@ -113,8 +125,9 @@ jobs:
                   )
 
               if "data" not in data:
+
                   raise RuntimeError(
-                      "LeetCode returned no data."
+                      "LeetCode returned no GraphQL data."
                   )
 
               return data["data"]
@@ -149,16 +162,14 @@ jobs:
                   query,
                   {
                       "username": LEETCODE_USERNAME,
-                      "limit": 50,
+                      "limit": 20,
                   }
               )
 
-              submissions = data.get(
+              return data.get(
                   "recentAcSubmissionList",
                   []
               )
-
-              return submissions
 
 
           # ============================================================
@@ -168,24 +179,25 @@ jobs:
           def get_submission_code(submission_id):
 
               query = """
-              query submissionDetails(
-                  $submissionId: Int!
-              ) {
-                  submissionDetails(
-                      submissionId: $submissionId
-                  ) {
+              query submissionDetail($id: ID!) {
+                  submissionDetail(submissionId: $id) {
+                      id
                       code
-                      lang
                       runtime
                       memory
+                      rawMemory
+                      statusDisplay
                       timestamp
-                      statusCode
-                      statusMsg
+                      lang
+                      passedTestCaseCnt
+                      totalTestCaseCnt
+                      sourceUrl
                       question {
+                          titleSlug
+                          title
+                          translatedTitle
                           questionId
                           questionFrontendId
-                          title
-                          titleSlug
                       }
                   }
               }
@@ -194,13 +206,18 @@ jobs:
               data = graphql(
                   query,
                   {
-                      "submissionId": int(submission_id),
+                      "id": str(submission_id),
                   }
               )
 
-              return data.get(
-                  "submissionDetails"
+              submission = data.get(
+                  "submissionDetail"
               )
+
+              if not submission:
+                  return None
+
+              return submission
 
 
           # ============================================================
@@ -223,7 +240,7 @@ jobs:
 
 
           # ============================================================
-          # LANGUAGE -> FILE EXTENSION
+          # LANGUAGE EXTENSIONS
           # ============================================================
 
           def language_extension(lang):
@@ -253,7 +270,7 @@ jobs:
 
 
           # ============================================================
-          # LOAD ALREADY SYNCED SUBMISSIONS
+          # LOAD SYNCED SUBMISSION IDS
           # ============================================================
 
           def load_synced_submissions():
@@ -285,7 +302,7 @@ jobs:
 
 
           # ============================================================
-          # COMMIT ONE LEETCODE SUBMISSION
+          # COMMIT ONE SUBMISSION
           # ============================================================
 
           def commit_submission(
@@ -302,7 +319,7 @@ jobs:
               print()
               print("=" * 70)
               print(
-                  f"Creating commit for submission "
+                  f"Creating Git commit for submission "
                   f"{submission_id}"
               )
               print(
@@ -310,8 +327,9 @@ jobs:
               )
               print("=" * 70)
 
+
               # --------------------------------------------------------
-              # Extract problem number
+              # Problem number
               # --------------------------------------------------------
 
               problem_number = ""
@@ -326,7 +344,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Create unique submission directory
+              # Unique submission record
               # --------------------------------------------------------
 
               submission_dir = (
@@ -337,22 +355,6 @@ jobs:
                   submission_dir,
                   exist_ok=True
               )
-
-
-              # --------------------------------------------------------
-              # Unique metadata file
-              #
-              # IMPORTANT:
-              # submission_id is unique for EVERY submission.
-              #
-              # Therefore:
-              #
-              # Same problem + same code
-              # = new submission ID
-              # = new JSON file
-              # = Git change
-              # = new commit
-              # --------------------------------------------------------
 
               metadata = {
                   "submission_id": str(
@@ -381,12 +383,12 @@ jobs:
                       metadata,
                       file,
                       indent=2,
-                      ensure_ascii=False,
+                      ensure_ascii=False
                   )
 
 
               # --------------------------------------------------------
-              # Main problem folder
+              # Problem folder
               # --------------------------------------------------------
 
               if problem_number:
@@ -408,7 +410,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Save solution
+              # Solution file
               # --------------------------------------------------------
 
               extension = (
@@ -430,7 +432,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Save README
+              # README
               # --------------------------------------------------------
 
               readme_path = (
@@ -458,7 +460,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Configure Git
+              # Git identity
               # --------------------------------------------------------
 
               git(
@@ -475,19 +477,19 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Stage ONLY this submission
+              # Stage only this submission
               # --------------------------------------------------------
 
               git(
                   "add",
                   metadata_path,
                   solution_path,
-                  readme_path,
+                  readme_path
               )
 
 
               # --------------------------------------------------------
-              # Verify staged changes
+              # Check for changes
               # --------------------------------------------------------
 
               result = subprocess.run(
@@ -495,22 +497,22 @@ jobs:
                       "git",
                       "diff",
                       "--cached",
-                      "--quiet",
+                      "--quiet"
                   ]
               )
 
               if result.returncode == 0:
 
                   print(
-                      f"No Git changes detected for "
-                      f"submission {submission_id}"
+                      f"No changes for submission "
+                      f"{submission_id}"
                   )
 
                   return False
 
 
               # --------------------------------------------------------
-              # Create ONE commit
+              # ONE COMMIT
               # --------------------------------------------------------
 
               commit_message = (
@@ -526,7 +528,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Push ONE commit
+              # PUSH
               # --------------------------------------------------------
 
               git(
@@ -535,14 +537,9 @@ jobs:
                   "HEAD:main"
               )
 
-
               print()
               print(
-                  f"SUCCESS: committed submission "
-                  f"{submission_id}"
-              )
-              print(
-                  f"Commit: {commit_message}"
+                  f"SUCCESS: {commit_message}"
               )
               print()
 
@@ -559,11 +556,10 @@ jobs:
               print("=" * 70)
               print("LEETCODE AUTO SYNC")
               print("=" * 70)
-              print()
 
               print(
-                  "LeetCode username:",
-                  LEETCODE_USERNAME
+                  f"LeetCode username: "
+                  f"{LEETCODE_USERNAME}"
               )
 
               print(
@@ -581,10 +577,6 @@ jobs:
               )
 
 
-              # --------------------------------------------------------
-              # Find submissions already synced
-              # --------------------------------------------------------
-
               synced = (
                   load_synced_submissions()
               )
@@ -595,10 +587,7 @@ jobs:
               )
 
 
-              # --------------------------------------------------------
-              # Oldest submission first
-              # --------------------------------------------------------
-
+              # Oldest first.
               submissions = sorted(
                   submissions,
                   key=lambda item: int(
@@ -607,12 +596,8 @@ jobs:
               )
 
 
-              new_submissions = 0
+              new_commits = 0
 
-
-              # --------------------------------------------------------
-              # Process submissions
-              # --------------------------------------------------------
 
               for submission in submissions:
 
@@ -622,19 +607,21 @@ jobs:
 
 
                   # ----------------------------------------------------
-                  # Skip ONLY if THIS EXACT SUBMISSION was synced
+                  # IMPORTANT:
                   #
-                  # We DO NOT check the problem name.
+                  # We only skip the EXACT same submission ID.
                   #
-                  # Therefore solving an old problem again works.
+                  # We do NOT skip based on problem.
+                  #
+                  # Therefore re-solving an old problem works.
                   # ----------------------------------------------------
 
                   if submission_id in synced:
 
                       print(
-                          f"Skipping already synced "
-                          f"submission {submission_id}: "
-                          f"{submission['title']}"
+                          f"Already synced: "
+                          f"{submission_id} "
+                          f"- {submission['title']}"
                       )
 
                       continue
@@ -642,14 +629,14 @@ jobs:
 
                   print()
                   print(
-                      f"Processing submission "
-                      f"{submission_id}: "
-                      f"{submission['title']}"
+                      f"Processing: "
+                      f"{submission_id} "
+                      f"- {submission['title']}"
                   )
 
 
                   # ----------------------------------------------------
-                  # Get source code
+                  # Get code
                   # ----------------------------------------------------
 
                   details = (
@@ -662,76 +649,51 @@ jobs:
                   if not details:
 
                       print(
-                          f"Could not retrieve submission "
-                          f"{submission_id}"
+                          f"Could not retrieve "
+                          f"submission {submission_id}"
                       )
 
                       continue
 
 
                   # ----------------------------------------------------
-                  # Only process accepted submissions
+                  # Safety check
                   # ----------------------------------------------------
 
                   if (
-                      submission.get(
+                      details.get(
                           "statusDisplay"
                       )
                       != "Accepted"
                   ):
 
                       print(
-                          f"Skipping submission "
-                          f"{submission_id} "
-                          f"because status is "
-                          f"{submission.get('statusDisplay')}"
+                          f"Skipping non-accepted "
+                          f"submission {submission_id}"
                       )
 
                       continue
 
 
                   # ----------------------------------------------------
-                  # Create ONE commit for this submission
+                  # Create exactly ONE commit
                   # ----------------------------------------------------
 
                   committed = commit_submission(
 
-                      submission_id=(
-                          submission_id
-                      ),
-
-                      title=(
-                          submission["title"]
-                      ),
-
-                      slug=(
-                          submission["titleSlug"]
-                      ),
-
-                      code=(
-                          details["code"]
-                      ),
-
-                      lang=(
-                          details["lang"]
-                      ),
-
-                      timestamp=(
-                          details["timestamp"]
-                      ),
-
-                      runtime=(
-                          details.get("runtime")
-                      ),
-
-                      memory=(
-                          details.get("memory")
-                      ),
+                      submission_id,
+                      submission["title"],
+                      submission["titleSlug"],
+                      details["code"],
+                      details["lang"],
+                      details["timestamp"],
+                      details.get("runtime"),
+                      details.get("memory"),
                   )
 
 
                   if committed:
-                      new_submissions += 1
+                      new_commits += 1
 
 
               print()
@@ -739,8 +701,8 @@ jobs:
               print("SYNC COMPLETE")
               print("=" * 70)
               print(
-                  f"New submissions committed: "
-                  f"{new_submissions}"
+                  f"New Git commits: "
+                  f"{new_commits}"
               )
               print("=" * 70)
 

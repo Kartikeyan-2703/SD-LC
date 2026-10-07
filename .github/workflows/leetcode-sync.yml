@@ -1,0 +1,405 @@
+name: LeetCode Auto Sync
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "*/30 * * * *"
+
+concurrency:
+  group: leetcode-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Sync LeetCode submissions
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          GIT_COMMIT_EMAIL: ${{ secrets.GIT_COMMIT_EMAIL }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          cat > sync_leetcode.py <<'PY'
+          import os
+          import json
+          import re
+          import subprocess
+          from datetime import datetime, timezone
+
+          import requests
+
+
+          LEETCODE_GRAPHQL = "https://leetcode.com/graphql"
+
+          SESSION = os.environ["LEETCODE_SESSION"]
+          CSRF = os.environ["LEETCODE_CSRF_TOKEN"]
+          COMMIT_EMAIL = os.environ["GIT_COMMIT_EMAIL"]
+
+          HEADERS = {
+              "Content-Type": "application/json",
+              "Origin": "https://leetcode.com",
+              "Referer": "https://leetcode.com/",
+              "x-csrftoken": CSRF,
+              "User-Agent": (
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 Chrome/154.0 Safari/537.36"
+              ),
+          }
+
+          COOKIES = {
+              "LEETCODE_SESSION": SESSION,
+              "csrftoken": CSRF,
+          }
+
+
+          def graphql(query, variables=None):
+              response = requests.post(
+                  LEETCODE_GRAPHQL,
+                  headers=HEADERS,
+                  cookies=COOKIES,
+                  json={
+                      "query": query,
+                      "variables": variables or {},
+                  },
+                  timeout=30,
+              )
+
+              response.raise_for_status()
+
+              data = response.json()
+
+              if data.get("errors"):
+                  raise RuntimeError(
+                      json.dumps(data["errors"], indent=2)
+                  )
+
+              return data["data"]
+
+
+          def get_recent_accepted_submissions():
+              query = """
+              query recentAcSubmissions($limit: Int!) {
+                  recentAcSubmissionList(limit: $limit) {
+                      id
+                      title
+                      titleSlug
+                      timestamp
+                      lang
+                      statusDisplay
+                  }
+              }
+              """
+
+              data = graphql(
+                  query,
+                  {
+                      "limit": 50
+                  }
+              )
+
+              return data.get("recentAcSubmissionList", [])
+
+
+          def get_submission_code(submission_id):
+              query = """
+              query submissionDetails($submissionId: Int!) {
+                  submissionDetails(submissionId: $submissionId) {
+                      code
+                      lang
+                      runtime
+                      memory
+                      timestamp
+                      statusCode
+                      statusMsg
+                      question {
+                          questionId
+                          questionFrontendId
+                          title
+                          titleSlug
+                      }
+                  }
+              }
+              """
+
+              data = graphql(
+                  query,
+                  {
+                      "submissionId": int(submission_id)
+                  }
+              )
+
+              return data["submissionDetails"]
+
+
+          def safe_name(value):
+              value = value.lower()
+              value = re.sub(r"[^a-z0-9]+", "-", value)
+              value = value.strip("-")
+              return value
+
+
+          def language_extension(lang):
+              mapping = {
+                  "cpp": "cpp",
+                  "c++": "cpp",
+                  "python": "py",
+                  "python3": "py",
+                  "java": "java",
+                  "javascript": "js",
+                  "typescript": "ts",
+                  "c": "c",
+                  "csharp": "cs",
+                  "kotlin": "kt",
+                  "go": "go",
+                  "rust": "rs",
+                  "swift": "swift",
+                  "php": "php",
+                  "ruby": "rb",
+              }
+
+              return mapping.get(lang.lower(), "txt")
+
+
+          def load_synced_submissions():
+              directory = ".leetcode-sync/submissions"
+
+              if not os.path.exists(directory):
+                  return set()
+
+              return {
+                  filename[:-5]
+                  for filename in os.listdir(directory)
+                  if filename.endswith(".json")
+              }
+
+
+          def git(*args):
+              subprocess.run(
+                  ["git", *args],
+                  check=True,
+              )
+
+
+          def commit_submission(
+              submission_id,
+              title,
+              slug,
+              code,
+              lang,
+              timestamp,
+              runtime,
+              memory,
+          ):
+              problem_number = ""
+              match = re.search(r"^\d+", title)
+
+              if match:
+                  problem_number = match.group()
+
+              # The submission ID makes every submission unique.
+              submission_dir = ".leetcode-sync/submissions"
+              os.makedirs(submission_dir, exist_ok=True)
+
+              metadata = {
+                  "submission_id": str(submission_id),
+                  "problem": title,
+                  "slug": slug,
+                  "language": lang,
+                  "timestamp": timestamp,
+                  "runtime": runtime,
+                  "memory": memory,
+              }
+
+              metadata_path = (
+                  f"{submission_dir}/{submission_id}.json"
+              )
+
+              with open(
+                  metadata_path,
+                  "w",
+                  encoding="utf-8"
+              ) as file:
+                  json.dump(
+                      metadata,
+                      file,
+                      indent=2,
+                      ensure_ascii=False,
+                  )
+
+              # Keep the main solution organized by problem.
+              folder = (
+                  f"{problem_number}-{safe_name(slug)}"
+                  if problem_number
+                  else safe_name(slug)
+              )
+
+              os.makedirs(folder, exist_ok=True)
+
+              extension = language_extension(lang)
+
+              solution_path = (
+                  f"{folder}/solution.{extension}"
+              )
+
+              with open(
+                  solution_path,
+                  "w",
+                  encoding="utf-8"
+              ) as file:
+                  file.write(code)
+
+              # Also keep a readable submission record.
+              readme_path = f"{folder}/README.md"
+
+              with open(
+                  readme_path,
+                  "w",
+                  encoding="utf-8"
+              ) as file:
+                  file.write(
+                      f"# {title}\n\n"
+                      f"- LeetCode: "
+                      f"https://leetcode.com/problems/{slug}/\n"
+                      f"- Language: `{lang}`\n"
+                      f"- Submission ID: `{submission_id}`\n"
+                      f"- Runtime: `{runtime}`\n"
+                      f"- Memory: `{memory}`\n"
+                      f"- Submitted: `{timestamp}`\n"
+                  )
+
+              git("config", "user.name", "Kartikeyan-2703")
+              git("config", "user.email", COMMIT_EMAIL)
+
+              git(
+                  "add",
+                  metadata_path,
+                  solution_path,
+                  readme_path,
+              )
+
+              # Make sure there is something to commit.
+              result = subprocess.run(
+                  [
+                      "git",
+                      "diff",
+                      "--cached",
+                      "--quiet",
+                  ]
+              )
+
+              if result.returncode == 0:
+                  print(
+                      f"No changes detected for submission "
+                      f"{submission_id}"
+                  )
+                  return
+
+              commit_message = (
+                  f"LeetCode: {title} "
+                  f"(submission {submission_id})"
+              )
+
+              git(
+                  "commit",
+                  "-m",
+                  commit_message,
+              )
+
+              git(
+                  "push",
+                  "origin",
+                  "HEAD:main",
+              )
+
+              print(
+                  f"Committed submission {submission_id}: {title}"
+              )
+
+
+          def main():
+              print("Fetching recent accepted LeetCode submissions...")
+
+              submissions = get_recent_accepted_submissions()
+
+              print(
+                  f"Found {len(submissions)} recent accepted submissions."
+              )
+
+              synced = load_synced_submissions()
+
+              print(
+                  f"Already synced submissions: {len(synced)}"
+              )
+
+              # Oldest first.
+              submissions = sorted(
+                  submissions,
+                  key=lambda item: int(item["timestamp"]),
+              )
+
+              for submission in submissions:
+                  submission_id = str(submission["id"])
+
+                  if submission_id in synced:
+                      print(
+                          f"Skipping already synced submission "
+                          f"{submission_id}"
+                      )
+                      continue
+
+                  print(
+                      f"Processing submission "
+                      f"{submission_id}: "
+                      f"{submission['title']}"
+                  )
+
+                  details = get_submission_code(
+                      submission_id
+                  )
+
+                  if not details:
+                      print(
+                          f"Could not retrieve submission "
+                          f"{submission_id}"
+                      )
+                      continue
+
+                  commit_submission(
+                      submission_id=submission_id,
+                      title=submission["title"],
+                      slug=submission["titleSlug"],
+                      code=details["code"],
+                      lang=details["lang"],
+                      timestamp=details["timestamp"],
+                      runtime=details.get("runtime"),
+                      memory=details.get("memory"),
+                  )
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python sync_leetcode.py

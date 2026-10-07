@@ -62,11 +62,12 @@ jobs:
 
 
           # ============================================================
-          # HTTP CONFIGURATION
+          # HEADERS / COOKIES
           # ============================================================
 
           HEADERS = {
               "Content-Type": "application/json",
+              "Accept": "application/json",
               "Origin": "https://leetcode.com",
               "Referer": "https://leetcode.com/",
               "X-CSRFToken": CSRF,
@@ -85,7 +86,7 @@ jobs:
 
 
           # ============================================================
-          # GRAPHQL REQUEST
+          # GRAPHQL HELPER
           # ============================================================
 
           def graphql(query, variables=None):
@@ -101,17 +102,16 @@ jobs:
                   timeout=30,
               )
 
-              # Print response when LeetCode rejects request.
               if response.status_code != 200:
 
                   print()
                   print("LeetCode HTTP error:")
-                  print(response.status_code)
+                  print("Status:", response.status_code)
+                  print("Response:")
                   print(response.text)
                   print()
 
                   response.raise_for_status()
-
 
               data = response.json()
 
@@ -173,31 +173,36 @@ jobs:
 
 
           # ============================================================
-          # GET SUBMISSION SOURCE CODE
+          # GET SUBMISSION CODE
+          #
+          # IMPORTANT:
+          # Current LeetCode uses submissionDetails.
           # ============================================================
 
           def get_submission_code(submission_id):
 
               query = """
-              query submissionDetail($id: ID!) {
-                  submissionDetail(submissionId: $id) {
-                      id
-                      code
+              query submissionDetails(
+                  $submissionId: Int!
+              ) {
+                  submissionDetails(
+                      submissionId: $submissionId
+                  ) {
                       runtime
                       memory
-                      rawMemory
-                      statusDisplay
+                      code
                       timestamp
-                      lang
-                      passedTestCaseCnt
-                      totalTestCaseCnt
-                      sourceUrl
+                      statusCode
+                      statusDisplay
+                      lang {
+                          name
+                          verboseName
+                      }
                       question {
-                          titleSlug
-                          title
-                          translatedTitle
                           questionId
                           questionFrontendId
+                          title
+                          titleSlug
                       }
                   }
               }
@@ -206,18 +211,15 @@ jobs:
               data = graphql(
                   query,
                   {
-                      "id": str(submission_id),
+                      "submissionId": int(
+                          submission_id
+                      )
                   }
               )
 
-              submission = data.get(
-                  "submissionDetail"
+              return data.get(
+                  "submissionDetails"
               )
-
-              if not submission:
-                  return None
-
-              return submission
 
 
           # ============================================================
@@ -234,16 +236,19 @@ jobs:
                   value
               )
 
-              value = value.strip("-")
-
-              return value
+              return value.strip("-")
 
 
           # ============================================================
-          # LANGUAGE EXTENSIONS
+          # LANGUAGE EXTENSION
           # ============================================================
 
           def language_extension(lang):
+
+              if not lang:
+                  return "txt"
+
+              lang = lang.lower()
 
               mapping = {
                   "cpp": "cpp",
@@ -255,22 +260,27 @@ jobs:
                   "typescript": "ts",
                   "c": "c",
                   "csharp": "cs",
+                  "c#": "cs",
                   "kotlin": "kt",
                   "go": "go",
                   "rust": "rs",
                   "swift": "swift",
                   "php": "php",
                   "ruby": "rb",
+                  "scala": "scala",
+                  "mysql": "sql",
+                  "mssql": "sql",
+                  "oraclesql": "sql",
               }
 
               return mapping.get(
-                  lang.lower(),
+                  lang,
                   "txt"
               )
 
 
           # ============================================================
-          # LOAD SYNCED SUBMISSION IDS
+          # LOAD ALREADY-SYNCED SUBMISSIONS
           # ============================================================
 
           def load_synced_submissions():
@@ -319,11 +329,14 @@ jobs:
               print()
               print("=" * 70)
               print(
-                  f"Creating Git commit for submission "
+                  f"Creating commit for submission "
                   f"{submission_id}"
               )
               print(
                   f"Problem: {title}"
+              )
+              print(
+                  f"Language: {lang}"
               )
               print("=" * 70)
 
@@ -345,6 +358,17 @@ jobs:
 
               # --------------------------------------------------------
               # Unique submission record
+              #
+              # Every accepted submission has its own ID.
+              #
+              # This guarantees:
+              #
+              # Same problem
+              # Same code
+              # New submission ID
+              # New JSON file
+              # New Git change
+              # New Git commit
               # --------------------------------------------------------
 
               submission_dir = (
@@ -388,7 +412,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Problem folder
+              # Problem directory
               # --------------------------------------------------------
 
               if problem_number:
@@ -410,7 +434,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Solution file
+              # Solution
               # --------------------------------------------------------
 
               extension = (
@@ -489,7 +513,7 @@ jobs:
 
 
               # --------------------------------------------------------
-              # Check for changes
+              # Check staged changes
               # --------------------------------------------------------
 
               result = subprocess.run(
@@ -504,8 +528,7 @@ jobs:
               if result.returncode == 0:
 
                   print(
-                      f"No changes for submission "
-                      f"{submission_id}"
+                      "No changes detected."
                   )
 
                   return False
@@ -537,10 +560,12 @@ jobs:
                   "HEAD:main"
               )
 
+
               print()
               print(
-                  f"SUCCESS: {commit_message}"
+                  "SUCCESS:"
               )
+              print(commit_message)
               print()
 
               return True
@@ -577,6 +602,10 @@ jobs:
               )
 
 
+              # --------------------------------------------------------
+              # Existing submission IDs
+              # --------------------------------------------------------
+
               synced = (
                   load_synced_submissions()
               )
@@ -587,7 +616,10 @@ jobs:
               )
 
 
-              # Oldest first.
+              # --------------------------------------------------------
+              # Oldest first
+              # --------------------------------------------------------
+
               submissions = sorted(
                   submissions,
                   key=lambda item: int(
@@ -599,29 +631,38 @@ jobs:
               new_commits = 0
 
 
+              # --------------------------------------------------------
+              # Process submissions
+              # --------------------------------------------------------
+
               for submission in submissions:
 
                   submission_id = str(
                       submission["id"]
                   )
 
+                  title = submission["title"]
+
 
                   # ----------------------------------------------------
-                  # IMPORTANT:
+                  # ONLY submission ID is used for deduplication.
                   #
-                  # We only skip the EXACT same submission ID.
+                  # NOT problem name.
                   #
-                  # We do NOT skip based on problem.
+                  # NOT problem slug.
                   #
-                  # Therefore re-solving an old problem works.
+                  # NOT solution code.
+                  #
+                  # Therefore an old problem can be committed again.
                   # ----------------------------------------------------
 
                   if submission_id in synced:
 
                       print(
-                          f"Already synced: "
-                          f"{submission_id} "
-                          f"- {submission['title']}"
+                          f"Skipping already synced "
+                          f"submission: "
+                          f"{submission_id} - "
+                          f"{title}"
                       )
 
                       continue
@@ -629,14 +670,16 @@ jobs:
 
                   print()
                   print(
-                      f"Processing: "
-                      f"{submission_id} "
-                      f"- {submission['title']}"
+                      f"Processing submission: "
+                      f"{submission_id}"
+                  )
+                  print(
+                      f"Problem: {title}"
                   )
 
 
                   # ----------------------------------------------------
-                  # Get code
+                  # Retrieve code
                   # ----------------------------------------------------
 
                   details = (
@@ -650,29 +693,68 @@ jobs:
 
                       print(
                           f"Could not retrieve "
-                          f"submission {submission_id}"
+                          f"submission "
+                          f"{submission_id}"
                       )
 
                       continue
 
 
                   # ----------------------------------------------------
-                  # Safety check
+                  # Accepted check
                   # ----------------------------------------------------
 
-                  if (
-                      details.get(
-                          "statusDisplay"
-                      )
-                      != "Accepted"
-                  ):
+                  status = details.get(
+                      "statusDisplay"
+                  )
+
+                  if status != "Accepted":
 
                       print(
-                          f"Skipping non-accepted "
-                          f"submission {submission_id}"
+                          f"Skipping submission "
+                          f"{submission_id}. "
+                          f"Status: {status}"
                       )
 
                       continue
+
+
+                  # ----------------------------------------------------
+                  # Handle current lang format
+                  #
+                  # LeetCode may return:
+                  #
+                  # lang: {
+                  #     name: "cpp"
+                  # }
+                  #
+                  # or a string in some responses.
+                  # ----------------------------------------------------
+
+                  raw_lang = details.get(
+                      "lang"
+                  )
+
+                  if isinstance(
+                      raw_lang,
+                      dict
+                  ):
+
+                      lang = raw_lang.get(
+                          "name"
+                      )
+
+                  else:
+
+                      lang = raw_lang
+
+
+                  if not lang:
+
+                      lang = submission.get(
+                          "lang",
+                          "unknown"
+                      )
 
 
                   # ----------------------------------------------------
@@ -681,20 +763,51 @@ jobs:
 
                   committed = commit_submission(
 
-                      submission_id,
-                      submission["title"],
-                      submission["titleSlug"],
-                      details["code"],
-                      details["lang"],
-                      details["timestamp"],
-                      details.get("runtime"),
-                      details.get("memory"),
+                      submission_id=(
+                          submission_id
+                      ),
+
+                      title=title,
+
+                      slug=(
+                          submission["titleSlug"]
+                      ),
+
+                      code=(
+                          details["code"]
+                      ),
+
+                      lang=lang,
+
+                      timestamp=(
+                          details.get(
+                              "timestamp",
+                              submission["timestamp"]
+                          )
+                      ),
+
+                      runtime=(
+                          details.get(
+                              "runtime"
+                          )
+                      ),
+
+                      memory=(
+                          details.get(
+                              "memory"
+                          )
+                      ),
                   )
 
 
                   if committed:
+
                       new_commits += 1
 
+
+              # --------------------------------------------------------
+              # Final summary
+              # --------------------------------------------------------
 
               print()
               print("=" * 70)
